@@ -1,0 +1,30 @@
+{
+  "data": [{"id": "pl.example", "type": "playlists"}],
+  "resources": {
+    "playlists": {
+      "pl.example": {
+        "attributes": {
+          "name": "Example Playlist",
+          "artwork": {
+            "width": 1200,
+            "height": 1200,
+            "url": "https://is1-ssl.mzstatic.com/image/thumb/Fixture/cover.jpg/{w}x{h}bb.jpg"
+          }
+        }
+      }
+    },
+    "songs": {
+      "1001": {
+        "id": "1001",
+        "type": "songs",
+        "attributes": {
+          "artwork": {
+            "width": 512,
+            "height": 512,
+            "url": "https://is1-ssl.mzstatic.com/image/thumb/Fixture/related.jpg/{w}x{h}bb.jpg"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,8 @@
+global-exclude *
+include LICENSE
+include pyproject.toml MANIFEST.in README.md CONTRIBUTING.md CHANGELOG.md
+include docs/TECHNICAL.md docs/STATUS.md docs/AGENT_INTERFACE.md
+include src/apple_music_artwork/resources/apple-artwork-operator/SKILL.md
+recursive-include src/apple_music_artwork *.py
+recursive-include tests *.py *.json *.md
+recursive-include examples *.json

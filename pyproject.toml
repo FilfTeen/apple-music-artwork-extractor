@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apple-music-artwork"
+version = "0.5.0"
+description = "Discover, explain, and validate Apple Music visual artwork."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "FilfTeen"}]
+requires-python = ">=3.11"
+dependencies = ["Pillow>=12.3"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
+
+[project.urls]
+Repository = "https://github.com/FilfTeen/apple-music-artwork-extractor"
+Issues = "https://github.com/FilfTeen/apple-music-artwork-extractor/issues"
+
+[project.optional-dependencies]
+dev = ["build"]
+motion = ["m3u8>=6,<7"]
+ui = ["rich>=14.1,<15"]
+
+[project.scripts]
+apple-artwork = "apple_music_artwork.cli:main"
+apple-music-artwork = "apple_music_artwork.cli:main"
+
+[tool.setuptools]
+packages = ["apple_music_artwork"]
+package-dir = {"" = "src"}
+include-package-data = false
+
+[tool.setuptools.package-data]
+apple_music_artwork = ["resources/apple-artwork-operator/SKILL.md"]

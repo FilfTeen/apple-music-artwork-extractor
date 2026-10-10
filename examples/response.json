@@ -1,0 +1,67 @@
+{
+  "data": [
+    {
+      "id": "pl.example",
+      "type": "playlists",
+      "attributes": {
+        "name": "Example Playlist",
+        "url": "https://music.apple.com/us/playlist/example/pl.example",
+        "artwork": {
+          "width": 1200,
+          "height": 1200,
+          "url": "https://is1-ssl.mzstatic.com/image/thumb/Fixture/cover.jpg/{w}x{h}bb.jpg"
+        },
+        "editorialArtwork": {
+          "staticDetailSquare": {
+            "width": 3840,
+            "height": 3840,
+            "url": "https://is1-ssl.mzstatic.com/image/thumb/Fixture/clean.jpg/{w}x{h}{c}.{f}"
+          },
+          "subscriptionCover": {
+            "width": 1200,
+            "height": 1200,
+            "url": "https://is1-ssl.mzstatic.com/image/thumb/Fixture/cover.jpg/{w}x{h}bb.jpg"
+          },
+          "subscriptionHero": {
+            "width": 4320,
+            "height": 1080,
+            "url": "https://is1-ssl.mzstatic.com/image/thumb/Fixture/banner.jpg/{w}x{h}SC.DN01.{f}"
+          }
+        },
+        "editorialVideo": {
+          "motionDetailSquare": {
+            "previewFrame": {
+              "width": 3840,
+              "height": 3840,
+              "url": "https://is1-ssl.mzstatic.com/image/thumb/Fixture/motion.jpg/{w}x{h}bb.jpg"
+            },
+            "video": "https://mvod.itunes.apple.com/fixture/master.m3u8?variant=fixture"
+          }
+        }
+      },
+      "relationships": {
+        "tracks": {
+          "data": [
+            {
+              "id": "1001",
+              "type": "songs",
+              "attributes": {
+                "name": "Related Song",
+                "artwork": {
+                  "width": 512,
+                  "height": 512,
+                  "url": "https://is1-ssl.mzstatic.com/image/thumb/Fixture/related.jpg/{w}x{h}bb.jpg"
+                },
+                "previews": [
+                  {
+                    "url": "https://audio-ssl.itunes.apple.com/fixture/preview.m4a"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

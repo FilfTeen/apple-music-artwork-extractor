@@ -1,0 +1,30 @@
+{
+  "data": [
+    {
+      "id": "100",
+      "type": "albums",
+      "attributes": {
+        "name": "Example Album",
+        "isSingle": false,
+        "isCompilation": false,
+        "artwork": {
+          "width": 1200,
+          "height": 1200,
+          "url": "https://is1-ssl.mzstatic.com/image/thumb/Fixture/album.jpg/{w}x{h}bb.jpg"
+        },
+        "editorialArtwork": {
+          "staticDetailSquare": {
+            "width": 3840,
+            "height": 3840,
+            "url": "https://is1-ssl.mzstatic.com/image/thumb/Fixture/editorial.jpg/{w}x{h}{c}.{f}"
+          },
+          "superHeroTall": {
+            "width": 1680,
+            "height": 2240,
+            "url": "https://is1-ssl.mzstatic.com/image/thumb/Fixture/album.jpg/{w}x{h}SHT.AMTPPS01.{f}"
+          }
+        }
+      }
+    }
+  ]
+}

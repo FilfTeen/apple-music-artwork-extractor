@@ -1,0 +1,252 @@
+name: Checks
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+        extra: [""]
+        include:
+          - python-version: "3.12"
+            extra: ui
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install build frontend
+        run: python -m pip install build
+      - name: Build wheel from source distribution
+        run: python -m build
+      - name: Check distribution contents
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path, PurePosixPath
+          from email.parser import BytesParser
+          import tarfile
+          import tomllib
+          import zipfile
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          distribution = project["name"].replace("-", "_")
+          version = project["version"]
+          base = f"{distribution}-{version}"
+          metadata_files = {
+              "METADATA", "WHEEL", "RECORD", "entry_points.txt", "top_level.txt",
+          }
+          egg_files = {
+              "PKG-INFO", "SOURCES.txt", "dependency_links.txt", "entry_points.txt",
+              "requires.txt", "top_level.txt",
+          }
+          root_files = {"LICENSE", "README.md", "CONTRIBUTING.md", "CHANGELOG.md", "pyproject.toml", "MANIFEST.in", "PKG-INFO", "setup.cfg"}
+          docs = {f"docs/{name}.md" for name in ("TECHNICAL", "STATUS", "AGENT_INTERFACE")}
+          guide = "apple_music_artwork/resources/apple-artwork-operator/SKILL.md"
+          license_body = Path("LICENSE").read_bytes()
+          wheel_license = f"{base}.dist-info/licenses/LICENSE"
+
+          def source_allowed(path):
+              parts = path.parts
+              return (
+                  str(path) in root_files | docs
+                  or str(path) == "src/" + guide
+                  or len(parts) == 3 and parts[:2] == ("src", "apple_music_artwork") and path.suffix == ".py"
+                  or len(parts) == 3 and parts[:2] == ("src", f"{distribution}.egg-info") and path.name in egg_files
+                  or len(parts) > 1 and parts[0] == "tests" and path.suffix in {".py", ".json", ".md"}
+                  or len(parts) == 2 and parts[0] == "examples" and path.suffix == ".json"
+              )
+
+          def inspect_path(path):
+              assert not path.is_absolute() and ".." not in path.parts, path
+              assert not any(part.startswith(".") for part in path.parts), path
+
+          wheels = list(Path("dist").glob("*.whl"))
+          sdists = list(Path("dist").glob("*.tar.gz"))
+          assert len(wheels) == len(sdists) == 1, "expected exactly one wheel and one sdist"
+          with zipfile.ZipFile(wheels[0]) as archive:
+              assert archive.read(wheel_license) == license_body
+              metadata = BytesParser().parsebytes(archive.read(f"{base}.dist-info/METADATA"))
+              assert metadata["License-Expression"] == "MIT"
+              assert metadata.get_all("License-File") == ["LICENSE"]
+              for name in archive.namelist():
+                  path = PurePosixPath(name)
+                  assert (
+                      len(path.parts) == 2 and path.parts[0] == "apple_music_artwork" and path.suffix == ".py"
+                      or str(path) == guide
+                      or str(path) == wheel_license
+                      or len(path.parts) == 2 and path.parts[0] == f"{base}.dist-info" and path.name in metadata_files
+                  ), path
+                  inspect_path(path)
+                  archive.read(name)
+          with tarfile.open(sdists[0]) as archive:
+              assert archive.extractfile(f"{base}/LICENSE").read() == license_body
+              metadata = BytesParser().parsebytes(archive.extractfile(f"{base}/PKG-INFO").read())
+              assert metadata["License-Expression"] == "MIT"
+              assert metadata.get_all("License-File") == ["LICENSE"]
+              for member in archive.getmembers():
+                  path = PurePosixPath(member.name)
+                  assert path.parts[0] == base and ".." not in path.parts, path
+                  assert not member.issym() and not member.islnk(), path
+                  if member.isdir():
+                      continue
+                  assert member.isfile(), path
+                  relative = PurePosixPath(*path.parts[1:])
+                  assert source_allowed(relative), relative
+                  inspect_path(relative)
+                  archive.extractfile(member).read()
+          print("wheel and sdist contents match the intended package files")
+          PY
+      - name: Install the built wheel
+        env:
+          ARTWORK_EXTRA: ${{ matrix.extra }}
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import subprocess
+          import sys
+          wheel, = Path("dist").glob("*.whl")
+          extra = os.environ["ARTWORK_EXTRA"]
+          subprocess.run([sys.executable, "-m", "pip", "install", str(wheel) + (f"[{extra}]" if extra else "")], check=True)
+          PY
+      - name: Run base-dependency tests against installed package
+        env:
+          ARTWORK_EXTRA: ${{ matrix.extra }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from importlib.util import find_spec
+          from importlib.metadata import version
+          import os
+          import shutil
+          import sys
+          import tempfile
+          import unittest
+          import apple_music_artwork
+
+          assert not Path(apple_music_artwork.__file__).resolve().is_relative_to(Path("src").resolve())
+          assert apple_music_artwork.__version__ == version("apple-music-artwork")
+          assert find_spec("m3u8") is None, "this job must exercise base dependencies only"
+          assert (find_spec("rich") is not None) == (os.environ["ARTWORK_EXTRA"] == "ui")
+
+          def cases(suite):
+              for item in suite:
+                  if isinstance(item, unittest.TestSuite):
+                      yield from cases(item)
+                  else:
+                      yield item
+
+          discovered = list(cases(unittest.defaultTestLoader.discover("tests")))
+          optional = [case for case in discovered if case.id().startswith(("test_hls.", "test_execution_motion.", "test_execution_runtime.ExecutionMotionRuntimeTests.", "test_execution_v04.MotionDecisionTests.", "test_remote_check.MotionObservationTests.", "test_cli_v05.CliUpdateMotionFailureTests."))]
+          assert optional, "expected explicitly separated optional-parser coverage"
+          suite = unittest.TestSuite(case for case in discovered if case not in optional)
+          assert suite.countTestCases() > 0, "test discovery returned no tests"
+          print(f"Base job: {suite.countTestCases()} tests; {len(optional)} parser tests run in media job")
+          with tempfile.TemporaryDirectory(prefix="no-media-tools-", dir=os.environ["RUNNER_TEMP"]) as empty_tools:
+              os.environ["PATH"] = empty_tools
+              assert shutil.which("ffmpeg") is None and shutil.which("ffprobe") is None
+              result = unittest.TextTestRunner(verbosity=2).run(suite)
+          sys.exit(not result.wasSuccessful())
+          PY
+      - name: Check installed command entry points
+        run: |
+          apple-artwork --help
+          apple-music-artwork --version
+          python -m apple_music_artwork --version
+          apple-artwork 'https://music.apple.com/us/playlist/example/pl.example' --response examples/response.json --list --json
+          apple-artwork capabilities --json
+          apple-artwork capabilities --guide
+
+  media:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        extra: ["motion", "motion,ui"]
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install build and media tools
+        run: |
+          python -m pip install build
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y ffmpeg
+      - name: Build and install wheel with motion extra
+        env:
+          ARTWORK_EXTRA: ${{ matrix.extra }}
+        shell: bash
+        run: |
+          python -m build
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          import subprocess
+          import sys
+
+          wheels = list(Path("dist").glob("*.whl"))
+          assert len(wheels) == 1
+          subprocess.run([sys.executable, "-m", "pip", "install", str(wheels[0]) + "[" + os.environ["ARTWORK_EXTRA"] + "]"], check=True)
+          PY
+      - name: Run complete offline tests against installed package
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from importlib.metadata import version
+          import sys
+          import unittest
+          import apple_music_artwork
+          import m3u8
+
+          assert not Path(apple_music_artwork.__file__).resolve().is_relative_to(Path("src").resolve())
+          assert apple_music_artwork.__version__ == version("apple-music-artwork")
+          assert callable(m3u8.loads)
+          suite = unittest.defaultTestLoader.discover("tests")
+          assert suite.countTestCases() > 0
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          sys.exit(not result.wasSuccessful())
+          PY
+      - name: Generate owned H264 and exercise real CLI decoding
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+          import sys
+          import tempfile
+
+          root = Path(tempfile.mkdtemp(prefix="artwork-media-", dir=os.environ["RUNNER_TEMP"]))
+          sys.path.insert(0, "tests")
+          from test_cli_media_tools import generate_owned_inputs
+
+          ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+          assert ffmpeg and ffprobe
+          fixture, bframes = generate_owned_inputs(root, ffmpeg, ffprobe)
+          subprocess.run([
+              sys.executable, "-B", "tests/test_cli_media_tools.py", "--input-video", str(fixture),
+              "--bframes-video", str(bframes), "--output-root", str(root),
+              "--ffmpeg", ffmpeg, "--ffprobe", ffprobe, "--require-installed",
+          ], check=True, timeout=180)
+          PY
