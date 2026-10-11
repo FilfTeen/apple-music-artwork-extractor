@@ -244,6 +244,67 @@ jobs:
           ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
           assert ffmpeg and ffprobe
           fixture, bframes = generate_owned_inputs(root, ffmpeg, ffprobe)
+          # Report both owned inputs before the CLI assertion can stop the job.
+          from fractions import Fraction
+          from hashlib import sha256
+          import json
+          from types import SimpleNamespace
+          from apple_music_artwork.errors import ArtworkError
+          from apple_music_artwork.motion import MediaTools, validate_motion
+
+          tools = MediaTools.discover(ffmpeg=ffmpeg, ffprobe=ffprobe)
+          versions = {}
+          for name, executable in (("ffmpeg", ffmpeg), ("ffprobe", ffprobe)):
+              result = subprocess.run([executable, "-version"], capture_output=True, text=True, timeout=30)
+              versions[name] = {"exit": result.returncode, "version": result.stdout.splitlines()[0]}
+          print("MEDIA_DIAGNOSTIC_TOOLS " + json.dumps(versions, sort_keys=True), flush=True)
+          for sample, expected_fps in ((fixture, 2), (bframes, 24)):
+              probe = subprocess.run([
+                  ffprobe, "-v", "error", "-protocol_whitelist", "file",
+                  "-show_packets", "-show_entries", "format=format_name,start_time,duration,size:stream=index,codec_name,codec_type,width,height,avg_frame_rate,r_frame_rate,start_pts,start_time,duration_ts,duration,time_base,pix_fmt,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:packet=stream_index,pts,dts,duration,flags",
+                  "-of", "json", "-i", str(sample),
+              ], capture_output=True, text=True, timeout=30)
+              evidence = {"sample": sample.name, "hls_frame_rate": expected_fps,
+                          "bytes": sample.stat().st_size, "sha256": sha256(sample.read_bytes()).hexdigest(),
+                          "probe_exit": probe.returncode}
+              if probe.returncode == 0:
+                  observed = json.loads(probe.stdout)
+                  evidence["streams"] = observed.get("streams", [])
+                  evidence["packets"] = observed.get("packets", [])
+                  stream, = evidence["streams"]
+                  time_base = Fraction(stream["time_base"])
+                  intervals = sorted((int(p["pts"]), int(p["duration"])) for p in evidence["packets"])
+                  span = (max(start + duration for start, duration in intervals) - intervals[0][0]) * time_base
+                  minimum = min(duration for _, duration in intervals) * time_base
+                  evidence["presentation_span_seconds"] = str(span)
+                  evidence["minimum_packet_duration_seconds"] = str(minimum)
+                  evidence["presentation_maximum_fps"] = str(1 / minimum)
+              broad = subprocess.run([
+                  ffprobe, "-v", "error", "-select_streams", "v:0", "-show_streams",
+                  "-show_format", "-show_packets", "-of", "json", str(sample),
+              ], capture_output=True, text=True, timeout=30)
+              evidence["broad_probe"] = {"exit": broad.returncode}
+              if broad.returncode == 0:
+                  broad_stream = json.loads(broad.stdout)["streams"][0]
+                  evidence["broad_probe"].update({key: broad_stream.get(key) for key in ("avg_frame_rate", "r_frame_rate")})
+              inspection = SimpleNamespace(
+                  supported=True,
+                  selected=SimpleNamespace(codec="h264", width=64, height=64, frame_rate=expected_fps),
+                  layout=SimpleNamespace(content_length=evidence["bytes"], duration=1 if expected_fps == 2 else 2))
+              try:
+                  validated = validate_motion(sample, inspection, tools, {"bytes": evidence["bytes"], "sha256": evidence["sha256"]})
+                  evidence["product_validation"] = {"status": "passed", "decoded_frames": validated["decoded_frames"]}
+              except ArtworkError as error:
+                  evidence["product_validation"] = {"status": "rejected", "code": error.code}
+              decoded = subprocess.run([
+                  ffmpeg, "-nostdin", "-v", "error", "-xerror", "-protocol_whitelist", "file",
+                  "-i", str(sample), "-map", "0:v:0", "-an", "-sn", "-dn",
+                  "-progress", "pipe:1", "-f", "null", "-",
+              ], capture_output=True, text=True, timeout=60)
+              progress = dict(line.split("=", 1) for line in decoded.stdout.splitlines() if "=" in line)
+              evidence["full_decode"] = {"exit": decoded.returncode, **{
+                  key: progress.get(key) for key in ("frame", "out_time_us", "dup_frames", "drop_frames", "progress")}}
+              print("MEDIA_DIAGNOSTIC_SAMPLE " + json.dumps(evidence, sort_keys=True), flush=True)
           subprocess.run([
               sys.executable, "-B", "tests/test_cli_media_tools.py", "--input-video", str(fixture),
               "--bframes-video", str(bframes), "--output-root", str(root),
