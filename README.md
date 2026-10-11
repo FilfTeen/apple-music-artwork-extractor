@@ -8,7 +8,22 @@ v0.5 提供可读任务导航、编号接续、离线版本差异与只读远端
 
 需要 Python 3.11+。下载功能需要 macOS 或 Linux 的目录描述符能力；Windows 下载尚不支持。静态功能只依赖 Pillow。
 
-在源码目录执行：
+从 GitHub Release 下载 `apple_music_artwork-0.5.1-py3-none-any.whl` 后，可在新的虚拟环境中安装：
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install ./apple_music_artwork-0.5.1-py3-none-any.whl
+apple-artwork doctor
+```
+
+使用同一 wheel 安装可选终端界面及动态解析依赖：
+
+```sh
+python -m pip install './apple_music_artwork-0.5.1-py3-none-any.whl[ui,motion]'
+```
+
+也可在完整源码目录执行：
 
 ```sh
 python3 -m venv .venv
@@ -19,7 +34,7 @@ apple-artwork --help
 
 `apple-music-artwork` 是同一命令的别名，也可运行 `python -m apple_music_artwork`。
 
-检查或下载动态素材时安装可选解析依赖：
+从源码安装时，在源码目录中添加动态检查或下载所需的可选解析依赖：
 
 ```sh
 python -m pip install '.[motion]'
@@ -29,14 +44,14 @@ python -m pip install '.[motion]'
 
 ## 先离线检查
 
-运行 `apple-artwork` 可进入简短向导；在管道或其他非交互环境中，无参数只显示简明用法。可选终端界面依赖提供更平稳的多条目刷新：
+运行 `apple-artwork` 可进入简短向导；在管道或其他非交互环境中，无参数只显示简明用法。可选终端界面依赖提供更平稳的多条目刷新。从源码安装时，在源码目录执行：
 
 ```sh
 python -m pip install '.[ui]'
 apple-artwork doctor
 ```
 
-`ui` 不改变下载和验证能力，未安装时仍可使用全部命令。需要完整界面及动态能力可安装 `.[ui,motion]`。
+`ui` 不改变下载和验证能力，未安装时仍可使用全部命令。从源码安装时，需要完整界面及动态能力可在源码目录安装 `.[ui,motion]`。
 
 以下示例无需连接 Apple，也不会写文件：
 
@@ -119,7 +134,7 @@ output/album/Synthetic Album--123456789/us--en-US/
 
 `-o DIR` 始终指定精确任务目录，不会偷偷在旁边创建新版。新目录按 `images/`、`videos/` 分类；旧 flat 目录原地兼容，不自动搬移媒体。首次执行旧任务时在锁内升级恢复状态并单独保留升级前副本；只读查询不迁移。
 
-相同任务继续原快照；已完成文件核对长度、SHA-256、请求和验证策略后复用，缺失或未完成文件从头补取。清单保留选择原因、语义引用、最终 URL、声明/请求/实际尺寸、解码格式、字节数与 SHA-256。整个命令的最终结果以退出码及 JSON 中的 `manifest_report` 为准。
+相同任务继续原快照；已完成文件核对长度、SHA-256、请求和验证策略后复用，缺失或未完成文件从头补取。升级到 v0.5.1 后，旧验证策略的已完成视频首次接续会在本地重新探测和完整解码，不重新下载；成功后再次接续无需重复媒体进程。原下载验证证据保留，新核验单独记录；失败时保留现有文件并报告原因。清单保留选择原因、语义引用、最终 URL、声明/请求/实际尺寸、解码格式、字节数与 SHA-256。整个命令的最终结果以退出码及 JSON 中的 `manifest_report` 为准。
 
 选择包含视频时，程序先检查动态依赖；缺失会在写入业务文件前失败。后续某个图片或视频失败时，会保留其他已完成文件和逐项结果，返回非零退出码。
 

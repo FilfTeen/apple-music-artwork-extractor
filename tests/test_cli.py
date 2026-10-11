@@ -56,7 +56,7 @@ class CliInputTests(TestCase):
         return code, stdout.getvalue(), stderr.getvalue()
 
     def test_help_and_version_use_requested_stream(self):
-        for args, expected in [(["--help"], "实验性公开 WebPlay"), (["--version"], "0.5.0")]:
+        for args, expected in [(["--help"], "实验性公开 WebPlay"), (["--version"], "0.5.1")]:
             code, stdout, stderr = self.run_cli(args)
             self.assertEqual(code, 0)
             self.assertIn(expected, stdout)

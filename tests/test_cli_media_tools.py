@@ -9,8 +9,10 @@ import argparse
 from fractions import Fraction
 from hashlib import sha256
 from importlib.metadata import distribution
+from copy import deepcopy
 from io import BytesIO, StringIO
 import json
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -22,6 +24,8 @@ import apple_music_artwork
 from apple_music_artwork.cli import main
 from apple_music_artwork.client import HttpResponse
 from apple_music_artwork.motion import MediaTools, ProcessRunner
+from apple_music_artwork.jsonio import dumps_json
+from apple_music_artwork.run_state import fingerprint
 
 
 BASE = "https://mvod.itunes.apple.com/itunes-assets/synthetic-integration/"
@@ -229,7 +233,14 @@ def _input_evidence(path, tools, *, bframes):
                                    "-show_entries", "frame=pict_type", "-of", "json", str(path)],
                                   capture_output=True, check=True, timeout=30)
         assert any(frame["pict_type"] == "B" for frame in json.loads(pictures.stdout)["frames"])
+    peak = 1 / (min(durations) * time_base)
+    assert peak == fps, "owned constant-rate input differs from its generation contract"
+    last_start = (max(pts) - min(pts)) * time_base
+    assert last_start == (Fraction(47, 24) if bframes else Fraction(1, 2))
     return body, {"frames": frames, "fps": fps, "duration": duration, "has_b_frames": stream["has_b_frames"],
+                  "average_frame_rate": stream["avg_frame_rate"], "nominal_frame_rate": stream["r_frame_rate"],
+                  "observed_maximum_fps": float(peak), "time_base": str(time_base),
+                  "last_frame_start_relative_seconds": float(last_start),
                   "presentation_start_seconds": float(min(pts) * time_base),
                   "container_duration_seconds": float(result["format"]["duration"])}
 
@@ -262,9 +273,13 @@ def _exercise(root, body, evidence, tools):
     assert validation["actual_codec"] == "h264" and validation["actual_dimensions"] == {"width": 64, "height": 64}
     assert validation["full_decode"] is True and validation["decoded_frames"] == evidence["frames"]
     assert validation["transcoded"] is False and abs(validation["duration_seconds"] - evidence["duration"]) < .01
+    assert validation["frame_rate"]["observed_maximum"] == evidence["observed_maximum_fps"]
     assert validation["duration_basis"] == "complete_packet_presentation_span"
     assert validation["packet_timeline"]["packet_count"] == evidence["frames"]
-    assert abs(validation["decode_endpoint_seconds"] - evidence["duration"]) < .01
+    # FFmpeg versions report either the last frame start or the full span.
+    endpoint = validation["decode_endpoint_seconds"]
+    assert min(abs(endpoint - value) for value in
+               (evidence["last_frame_start_relative_seconds"], evidence["duration"])) <= 0.000001
     assert validation["bytes"] == len(body) and validation["sha256"] == sha256(body).hexdigest()
     assert (output / image["path"]).read_bytes() == transport.png and image["validation"]["actual_format"] == "PNG"
     with Image.open(output / image["path"]) as pixels:
@@ -286,9 +301,72 @@ def _exercise(root, body, evidence, tools):
     assert tools.runner.operations == before, "reuse unexpectedly probed or decoded the media again"
     saved_reuse = json.loads((output / "manifest.json").read_text())
     assert saved_reuse == {name: value for name, value in reused.items() if name != "manifest_report"}
+    policy_upgrade = _old_policy_recovery(output, video, image, body, evidence, tools)
     return {"output": str(output), "video_bytes": len(body), "video_sha256": sha256(body).hexdigest(),
+            "old_policy_recovery": policy_upgrade,
             "decoded_frames": validation["decoded_frames"], "input_evidence": evidence,
             "http_operations": len(transport.calls), "reuse_requests": 0, "reuse_media_processes": 0}
+
+
+def _old_policy_recovery(source_output, video, image, body, evidence, tools):
+    """Synthetic v1-policy state, not an artifact created by an older wheel."""
+    output = Path(tempfile.mkdtemp(prefix="cli-old-policy-", dir=source_output.parent))
+    shutil.copytree(source_output, output, dirs_exist_ok=True)
+    state_path = output / ".apple-artwork-state" / "state.json"
+    state = json.loads(state_path.read_text())
+    item_id, = [key for key, record in state["payload"]["files"].items()
+                if record["artifact"]["kind"] == "video"]
+    record = state["payload"]["files"][item_id]
+    record["validation_policy"] = "mp4-packet-full-decode-v1"
+    record.pop("local_verification", None)
+    record["artifact"]["validation"]["frame_rate"].pop("observed_maximum", None)
+    legacy_artifact = deepcopy(record["artifact"])
+    state["payload_sha256"] = fingerprint(state["payload"])
+    state_path.write_text(dumps_json(state), encoding="utf-8")
+    before = len(tools.runner.operations)
+    code, first = _invoke(output, _NoNetwork(), tools)
+    assert code == 0, first.get("errors")
+    assert first["run"]["stats"]["requests"] == first["run"]["stats"]["received_bytes"] == 0
+    operations = tools.runner.operations[before:]
+    assert operations.count("probe") == operations.count("decode") == 1, operations
+    upgraded = next(item for item in first["downloads"] if item["kind"] == "video")
+    local = upgraded["local_verification"]
+    assert upgraded["validation"] == legacy_artifact["validation"]
+    assert local["decoded_this_run"] is True and local["method"] == "full_local_validation"
+    assert local["validation_policy"] == "mp4-packet-full-decode-v2"
+    assert local["validation"]["frame_rate"]["observed_maximum"] == evidence["fps"]
+    assert local["validation"]["full_decode"] is True
+    assert local["validation"]["decoded_frames"] == evidence["frames"]
+    assert (output / video["path"]).read_bytes() == body
+    after_first = json.loads(state_path.read_text())["payload"]["files"][item_id]
+    assert after_first["artifact"] == legacy_artifact
+    assert after_first["local_verification"] == local
+    before = list(tools.runner.operations)
+    code, second = _invoke(output, _NoNetwork(), tools)
+    assert code == 0 and second["run"]["stats"]["requests"] == 0, second.get("errors")
+    assert tools.runner.operations == before, "second resume must not start media processes"
+    repeated = next(item for item in second["downloads"] if item["kind"] == "video")
+    assert repeated["validation"] == legacy_artifact["validation"]
+    assert repeated["local_verification"]["decoded_this_run"] is False
+    assert repeated["local_verification"]["previous_full_validation"] == local
+    # A later changed file is retained and rejected before media tools run.
+    damaged = bytes([body[0] ^ 1]) + body[1:]
+    (output / video["path"]).write_bytes(damaged)
+    code, rejected = _invoke(output, _NoNetwork(), tools)
+    assert code != 0 and rejected["run"]["stats"]["requests"] == 0
+    assert tools.runner.operations == before
+    failed = next(item for item in rejected["downloads"] if item["kind"] == "video")
+    assert failed["error"]["code"] == "OUTPUT_CONFLICT"
+    assert (output / video["path"]).read_bytes() == damaged
+    assert (output / image["path"]).is_file()
+    retained = json.loads(state_path.read_text())["payload"]["files"][item_id]
+    assert retained["artifact"] == legacy_artifact
+    assert retained["local_verification"]["previous_full_validation"] == local
+    return {"fixture_kind": "synthetic_v1_policy_state", "first_resume_requests": 0,
+            "first_resume_probes": 1, "first_resume_full_decodes": 1,
+            "second_resume_requests": 0, "second_resume_media_processes": 0,
+            "original_validation_preserved": True, "current_validation_retained": True,
+            "damaged_file": "preserved_and_rejected_without_network_or_media_processes"}
 
 
 def _truncation(root, body, evidence, tools):

@@ -261,10 +261,15 @@ def validate_motion(path, inspection, tools, transfer, *, control=None, item_id=
         raise ArtworkError("ASSET_DIMENSION_MISMATCH", "Actual video dimensions differ from the selected HLS variant.", "validation")
     average = _positive_number(stream.get("avg_frame_rate"))
     nominal = _positive_number(stream.get("r_frame_rate"))
-    # HLS FRAME-RATE declares a maximum, not an exact average for VFR video.
-    if average is None or nominal is None or max(average, nominal) > selected.frame_rate + 0.05:
+    if average is None or average > selected.frame_rate + 0.05:
         raise ArtworkError("VIDEO_FRAME_RATE_MISMATCH", "Actual frame rate is invalid or exceeds the HLS declaration.", "validation")
     timeline, presentation_span = _packet_timeline(metadata.get("packets"), stream)
+    # HLS FRAME-RATE is a maximum. FFmpeg's r_frame_rate is an estimated
+    # timestamp base, so retain it as diagnostic evidence only. The proven
+    # contiguous presentation intervals establish the actual peak rate.
+    observed_maximum = 1 / (Fraction(timeline["time_base"]) * timeline["minimum_packet_duration_tick"])
+    if observed_maximum > Fraction(str(selected.frame_rate)) + Fraction("0.05"):
+        raise ArtworkError("VIDEO_FRAME_RATE_MISMATCH", "Actual frame rate is invalid or exceeds the HLS declaration.", "validation")
     duration = float(presentation_span)
     tolerance = max(0.1, 2 / average)
     if abs(duration - layout.duration) > tolerance:
@@ -293,6 +298,7 @@ def validate_motion(path, inspection, tools, transfer, *, control=None, item_id=
         raise ArtworkError("VIDEO_DECODE_TIMELINE_MISMATCH", "Complete decoding did not preserve the verified frame count and presentation span.", "validation")
     return {"actual_dimensions": {"width": width, "height": height}, "actual_format": "MP4",
             "actual_codec": stream["codec_name"], "frame_rate": {"average": average, "nominal": nominal,
+                                                                         "observed_maximum": float(observed_maximum),
                                                                          "declared_maximum": selected.frame_rate},
             "duration_seconds": duration, "duration_basis": "complete_packet_presentation_span",
             "duration_tolerance_seconds": tolerance, "packet_timeline": timeline,

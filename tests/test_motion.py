@@ -127,7 +127,7 @@ class MotionOutputTests(TestCase):
         for field, value, code in (("codec_name", "h264", "VIDEO_CODEC_MISMATCH"),
                                     ("width", 5, "ASSET_DIMENSION_MISMATCH"),
                                     ("avg_frame_rate", "60/1", "VIDEO_FRAME_RATE_MISMATCH"),
-                                    ("r_frame_rate", "0/0", "VIDEO_FRAME_RATE_MISMATCH")):
+                                    ("avg_frame_rate", "0/0", "VIDEO_FRAME_RATE_MISMATCH")):
             metadata = deepcopy(METADATA)
             metadata["streams"][0][field] = value
             cases.append((metadata, code))
@@ -148,6 +148,37 @@ class MotionOutputTests(TestCase):
         artifact = self.download(FakeRunner(metadata))
         self.assertLess(artifact["validation"]["frame_rate"]["average"], 30)
 
+    def test_two_frame_video_uses_observed_rate_not_estimated_base_rate(self):
+        # Linux FFmpeg 6.1.1 reports r_frame_rate=4 for this valid 2 fps shape.
+        metadata = deepcopy(METADATA)
+        metadata["streams"][0].update(avg_frame_rate="2/1", r_frame_rate="4/1", time_base="1/16384")
+        metadata["packets"] = [{"stream_index": 0, "pts": 0, "dts": 0, "duration": 8192},
+                               {"stream_index": 0, "pts": 8192, "dts": 8192, "duration": 8192}]
+        inspection = replace(INSPECTION, selected=replace(VARIANT, frame_rate=2),
+                             layout=replace(LAYOUT, duration=1))
+        artifact = self.download(FakeRunner(metadata, progress=decode_progress(frames=2, microseconds=500_000)),
+                                 inspection=inspection)
+        self.assertEqual(artifact["validation"]["frame_rate"],
+                         {"average": 2, "nominal": 4, "observed_maximum": 2, "declared_maximum": 2})
+        self.assertTrue(artifact["validation"]["full_decode"])
+        self.assertEqual((self.folder / artifact["path"]).read_bytes(), BODY)
+
+    def test_unavailable_estimated_base_rate_does_not_override_valid_timeline(self):
+        path = self.folder / "owned.mp4"
+        path.write_bytes(BODY)
+        for value in (None, "0/0", "0/1", "invalid", "-30/1"):
+            metadata = deepcopy(METADATA)
+            if value is None:
+                metadata["streams"][0].pop("r_frame_rate")
+            else:
+                metadata["streams"][0]["r_frame_rate"] = value
+            tools = MediaTools("/synthetic/ffmpeg", "/synthetic/ffprobe", "synthetic", "synthetic", FakeRunner(metadata))
+            with self.subTest(value=value):
+                result = validate_motion(path, INSPECTION, tools, {"bytes": len(BODY), "sha256": sha256(BODY).hexdigest()})
+                self.assertIsNone(result["frame_rate"]["nominal"])
+                self.assertEqual(result["frame_rate"]["observed_maximum"], 30)
+                self.assertTrue(result["full_decode"])
+
     def test_nonzero_fragment_timestamps_and_b_frames_use_presentation_span(self):
         # Reproduces the observed Apple layout: duration is a demuxer-declared
         # endpoint, and packet order is decoding order with reordered PTS.
@@ -167,14 +198,57 @@ class MotionOutputTests(TestCase):
 
     def test_proven_contiguous_vfr_is_allowed_without_constant_frame_spacing(self):
         metadata = deepcopy(METADATA)
-        metadata["streams"][0].update(time_base="1/2", avg_frame_rate="3/2", r_frame_rate="2/1")
+        metadata["streams"][0].update(time_base="1/2", avg_frame_rate="3/2", r_frame_rate="4/1")
         metadata["packets"] = [{"stream_index": 0, "pts": 0, "dts": 0, "duration": 1},
                                {"stream_index": 0, "pts": 2, "dts": 1, "duration": 2},
                                {"stream_index": 0, "pts": 1, "dts": 3, "duration": 1}]
-        result = self.download(FakeRunner(metadata, progress=decode_progress(frames=3)))["validation"]
+        inspection = replace(INSPECTION, selected=replace(VARIANT, frame_rate=2))
+        result = self.download(FakeRunner(metadata, progress=decode_progress(frames=3)), inspection=inspection)["validation"]
         self.assertEqual(result["duration_seconds"], 2)
         self.assertEqual(result["decoded_frames"], 3)
         self.assertEqual(result["packet_timeline"]["packet_count"], 3)
+        self.assertEqual(result["frame_rate"]["observed_maximum"], 2)
+
+    def test_vfr_actual_peak_exceeding_declaration_is_rejected_despite_lower_probe_rates(self):
+        metadata = deepcopy(METADATA)
+        metadata["streams"][0].update(time_base="1/2", avg_frame_rate="3/2", r_frame_rate="3/2")
+        metadata["packets"] = [{"stream_index": 0, "pts": 0, "dts": 0, "duration": 1},
+                               {"stream_index": 0, "pts": 2, "dts": 1, "duration": 2},
+                               {"stream_index": 0, "pts": 1, "dts": 3, "duration": 1}]
+        inspection = replace(INSPECTION, selected=replace(VARIANT, frame_rate=1.9))
+        runner = FakeRunner(metadata, progress=decode_progress(frames=3))
+        with self.assertRaises(ArtworkError) as failure:
+            self.download(runner, inspection=inspection)
+        self.assertEqual(failure.exception.code, "VIDEO_FRAME_RATE_MISMATCH")
+        self.assertEqual(len(runner.calls), 1)
+        self.assertEqual(list(self.folder.iterdir()), [])
+
+    def test_packet_rate_uses_existing_tolerance_without_expanding_it(self):
+        # Three contiguous intervals span two seconds. Their shortest interval
+        # gives exactly 2.05 fps, then 2.051 fps: on and above the 2 + .05 limit.
+        parent = self.folder
+        for ticks, shortest, allowed in ((41, 20, True), (2051, 1000, False)):
+            self.folder = parent / str(ticks)
+            self.folder.mkdir()
+            metadata = deepcopy(METADATA)
+            metadata["streams"][0].update(time_base=f"1/{ticks}", avg_frame_rate="3/2", r_frame_rate="3/2")
+            metadata["packets"] = [
+                {"stream_index": 0, "pts": 0, "dts": 0, "duration": shortest},
+                {"stream_index": 0, "pts": shortest, "dts": shortest, "duration": ticks - shortest},
+                {"stream_index": 0, "pts": ticks, "dts": ticks, "duration": ticks}]
+            inspection = replace(INSPECTION, selected=replace(VARIANT, frame_rate=2))
+            runner = FakeRunner(metadata, progress=decode_progress(frames=3))
+            with self.subTest(allowed=allowed):
+                if allowed:
+                    artifact = self.download(runner, inspection=inspection)
+                    self.assertEqual(artifact["validation"]["frame_rate"]["observed_maximum"], 2.05)
+                    (self.folder / artifact["path"]).unlink()
+                else:
+                    with self.assertRaises(ArtworkError) as failure:
+                        self.download(runner, inspection=inspection)
+                    self.assertEqual(failure.exception.code, "VIDEO_FRAME_RATE_MISMATCH")
+                    self.assertEqual(len(runner.calls), 1)
+                    self.assertEqual(list(self.folder.iterdir()), [])
 
     def test_missing_duplicate_or_invalid_packets_fail_before_decoding(self):
         cases = []

@@ -19,9 +19,14 @@ from unittest.mock import patch
 from apple_music_artwork.client import HttpClient, HttpResponse
 from apple_music_artwork.cli import main
 from apple_music_artwork.execution import execute
+from apple_music_artwork.errors import ArtworkError
+from apple_music_artwork.download import OutputDirectory
+from apple_music_artwork.motion import MediaTools
 from apple_music_artwork.jsonio import dumps_json, loads_json
-from apple_music_artwork.run_state import STATE_DIRECTORY
+from apple_music_artwork.run_state import STATE_DIRECTORY, RunState
+from apple_music_artwork.workflow import dispatch
 from test_hls import MEDIA, variant
+from test_motion import FakeRunner, METADATA
 
 
 ORIGIN = "https://mvod.itunes.apple.com/synthetic/"
@@ -100,6 +105,401 @@ class MotionRecoveryTests(TestCase):
         with patch("apple_music_artwork.motion.prepare_motion", side_effect=prepare) as worker:
             result, code = execute(self.args, http=HttpClient(transport), environ={}, media_tools=self.tools)
         return result, code, worker.call_count
+
+    def old_video_policy(self):
+        with OutputDirectory(self.output) as output, RunState(output) as state:
+            record = next(iter(state.data["files"].values()))
+            record["validation_policy"] = "mp4-packet-full-decode-v1"
+            state.save()
+            return deepcopy(record)
+
+    def video_record(self):
+        with OutputDirectory(self.output) as output, RunState(output) as state:
+            return deepcopy(next(iter(state.data["files"].values())))
+
+    def local_tools(self, **kwargs):
+        metadata = deepcopy(METADATA)
+        metadata["format"]["size"] = str(len(BODY))
+        metadata["streams"][0].update(width=1920, height=1080)
+        runner = FakeRunner(metadata, **kwargs)
+        self.tools = MediaTools("/synthetic/ffmpeg", "/synthetic/ffprobe", "synthetic", "synthetic", runner)
+        return runner
+
+    def test_completed_old_video_policy_revalidates_once_and_keeps_original_evidence(self):
+        first, code, _ = self.run_task(Metadata())
+        self.assertEqual(code, 0, first["errors"])
+        old = self.old_video_policy()
+        runner = self.local_tools()
+        transport = Metadata(forbid_get=True)
+        result, code, count = self.run_task(transport, prepare=AssertionError("no redownload"))
+        self.assertEqual(code, 0, result["errors"])
+        self.assertEqual(transport.calls, [])
+        self.assertEqual(count, 0)
+        self.assertEqual(len(runner.calls), 2)
+        entry = result["downloads"][0]
+        self.assertEqual(entry["action"], "reused")
+        self.assertEqual(entry["validation"], old["artifact"]["validation"])
+        verification = entry["local_verification"]
+        self.assertTrue(verification["decoded_this_run"])
+        self.assertTrue(verification["validation"]["full_decode"])
+        self.assertEqual(verification["validation_policy"], "mp4-packet-full-decode-v2")
+        record = self.video_record()
+        self.assertEqual(record["artifact"], old["artifact"])
+        self.assertEqual(record["validation_policy"], "mp4-packet-full-decode-v2")
+
+        runner.calls.clear()
+        for _ in range(2):
+            reused, code, count = self.run_task(transport, prepare=AssertionError("no redownload"))
+            self.assertEqual(code, 0, reused["errors"])
+            self.assertEqual(transport.calls, [])
+            self.assertEqual(runner.calls, [])
+            local = reused["downloads"][0]["local_verification"]
+            self.assertFalse(local["decoded_this_run"])
+            self.assertEqual(local["previous_full_validation"], verification)
+            self.assertEqual(self.video_record()["local_verification"], local)
+            self.assertEqual(self.video_record()["artifact"], old["artifact"])
+
+    def test_prepared_old_video_policy_publishes_local_revalidation_evidence(self):
+        class InterruptedPublication(BaseException):
+            pass
+
+        original = OutputDirectory.publish_temp
+
+        def interrupted(directory, temporary, **kwargs):
+            if temporary.final_name.endswith(".mp4"):
+                raise InterruptedPublication()
+            return original(directory, temporary, **kwargs)
+
+        with patch.object(OutputDirectory, "publish_temp", interrupted):
+            with self.assertRaises(InterruptedPublication):
+                self.run_task(Metadata())
+        old = self.old_video_policy()
+        self.assertEqual(old["status"], "prepared")
+        runner = self.local_tools()
+        transport = Metadata(forbid_get=True)
+        result, code, count = self.run_task(transport, prepare=AssertionError("no redownload"))
+        self.assertEqual(code, 0, result["errors"])
+        self.assertEqual(transport.calls, [])
+        self.assertEqual(count, 0)
+        self.assertEqual(len(runner.calls), 2)
+        entry = result["downloads"][0]
+        self.assertEqual(entry["validation"], old["artifact"]["validation"])
+        verification = entry["local_verification"]
+        self.assertTrue(verification["decoded_this_run"])
+        self.assertTrue(verification["validation"]["full_decode"])
+        self.assertEqual(self.video_record()["local_verification"], verification)
+        self.assertEqual(self.video_record()["validation_policy"], "mp4-packet-full-decode-v2")
+        self.assertEqual((self.output / entry["path"]).read_bytes(), BODY)
+        runner.calls.clear()
+        reused, code, count = self.run_task(transport, prepare=AssertionError("no redownload"))
+        self.assertEqual(code, 0, reused["errors"])
+        self.assertEqual(runner.calls, [])
+        self.assertFalse(reused["downloads"][0]["local_verification"]["decoded_this_run"])
+        self.assertEqual(reused["downloads"][0]["local_verification"]["previous_full_validation"], verification)
+
+    def test_failed_old_policy_revalidation_preserves_completed_file_and_old_evidence(self):
+        for failure in ({"probe_code": 1}, {"decode_code": 1}):
+            with self.subTest(failure=failure):
+                self.output = self.folder / next(iter(failure))
+                self.args.output = str(self.output)
+                first, code, _ = self.run_task(Metadata())
+                self.assertEqual(code, 0, first["errors"])
+                old = self.old_video_policy()
+                runner = self.local_tools(**failure)
+                transport = Metadata(forbid_get=True)
+                result, code, count = self.run_task(transport, prepare=AssertionError("no redownload"))
+                self.assertNotEqual(code, 0)
+                self.assertEqual(transport.calls, [])
+                self.assertEqual(count, 0)
+                self.assertEqual(len(runner.calls), 1 if "probe_code" in failure else 2)
+                expected = "VIDEO_PROBE_FAILED" if "probe_code" in failure else "VIDEO_DECODE_FAILED"
+                self.assertEqual(result["downloads"][0]["error"]["code"], expected)
+                record = self.video_record()
+                self.assertEqual(record["validation_policy"], old["validation_policy"])
+                self.assertEqual(record["artifact"], old["artifact"])
+                self.assertNotIn("local_verification", record)
+                self.assertEqual((self.output / first["downloads"][0]["path"]).read_bytes(), BODY)
+
+    def test_failed_prepared_revalidation_keeps_temporary_bytes_and_old_evidence(self):
+        class InterruptedPublication(BaseException):
+            pass
+
+        original = OutputDirectory.publish_temp
+
+        def interrupted(directory, temporary, **kwargs):
+            if temporary.final_name.endswith(".mp4"):
+                raise InterruptedPublication()
+            return original(directory, temporary, **kwargs)
+
+        with patch.object(OutputDirectory, "publish_temp", interrupted):
+            with self.assertRaises(InterruptedPublication):
+                self.run_task(Metadata())
+        old = self.old_video_policy()
+        runner = self.local_tools(decode_code=1)
+        transport = Metadata(forbid_get=True)
+        result, code, count = self.run_task(transport, prepare=AssertionError("no redownload"))
+        self.assertNotEqual(code, 0)
+        self.assertEqual(result["downloads"][0]["error"]["code"], "VIDEO_DECODE_FAILED")
+        self.assertEqual(transport.calls, [])
+        self.assertEqual(count, 0)
+        self.assertEqual(len(runner.calls), 2)
+        record = self.video_record()
+        self.assertEqual(record["validation_policy"], old["validation_policy"])
+        self.assertEqual(record["artifact"], old["artifact"])
+        self.assertEqual(record["temporary"], old["temporary"])
+        self.assertNotIn("local_verification", record)
+        self.assertEqual((self.output / old["temporary"]["name"]).read_bytes(), BODY)
+        self.assertFalse((self.output / old["artifact"]["path"]).exists())
+        failed_again, code, count = self.run_task(transport, prepare=AssertionError("no redownload"))
+        self.assertNotEqual(code, 0)
+        self.assertEqual(failed_again["downloads"][0]["error"]["code"], "VIDEO_DECODE_FAILED")
+        self.assertEqual(count, 0)
+        record = self.video_record()
+        self.assertEqual(record["temporary"], old["temporary"])
+        self.assertEqual(record["artifact"], old["artifact"])
+        self.assertEqual(record["validation_policy"], old["validation_policy"])
+        self.assertEqual((self.output / old["temporary"]["name"]).read_bytes(), BODY)
+        runner = self.local_tools()
+        recovered, code, count = self.run_task(transport, prepare=AssertionError("no redownload"))
+        self.assertEqual(code, 0, recovered["errors"])
+        self.assertEqual(count, 0)
+        self.assertEqual(len(runner.calls), 2)
+        self.assertTrue(recovered["downloads"][0]["local_verification"]["decoded_this_run"])
+        self.assertEqual(self.video_record()["artifact"], old["artifact"])
+        self.assertEqual(self.video_record()["validation_policy"], "mp4-packet-full-decode-v2")
+        self.assertEqual((self.output / recovered["downloads"][0]["path"]).read_bytes(), BODY)
+        runner.calls.clear()
+        reused, code, count = self.run_task(transport, prepare=AssertionError("no redownload"))
+        self.assertEqual(code, 0, reused["errors"])
+        self.assertFalse(reused["downloads"][0]["local_verification"]["decoded_this_run"])
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(transport.calls, [])
+
+    def test_reuse_does_not_attribute_mismatched_prior_verification_to_current_file(self):
+        first, code, _ = self.run_task(Metadata())
+        self.assertEqual(code, 0, first["errors"])
+        self.old_video_policy()
+        runner = self.local_tools()
+        transport = Metadata(forbid_get=True)
+        verified, code, _ = self.run_task(transport)
+        self.assertEqual(code, 0, verified["errors"])
+        verification = verified["downloads"][0]["local_verification"]
+        runner.calls.clear()
+        for key, value in (("validation_policy", "mp4-packet-full-decode-v1"),
+                           ("bytes", 11), ("sha256", "0" * 64)):
+            with self.subTest(field=key):
+                with OutputDirectory(self.output) as output, RunState(output) as state:
+                    record = next(iter(state.data["files"].values()))
+                    record["local_verification"] = deepcopy(verification)
+                    record["local_verification"][key] = value
+                    state.save()
+                reused, code, _ = self.run_task(transport)
+                self.assertEqual(code, 0, reused["errors"])
+                self.assertFalse(reused["downloads"][0]["local_verification"]["decoded_this_run"])
+                self.assertNotIn("previous_full_validation", reused["downloads"][0]["local_verification"])
+                self.assertEqual(runner.calls, [])
+                self.assertEqual(transport.calls, [])
+
+    def test_interrupted_prepared_policy_upgrade_resumes_with_prior_evidence_without_decoding(self):
+        class InterruptedPublication(BaseException):
+            pass
+
+        original = OutputDirectory.publish_temp
+
+        def interrupted(directory, temporary, **kwargs):
+            if temporary.final_name.endswith(".mp4"):
+                raise InterruptedPublication()
+            return original(directory, temporary, **kwargs)
+
+        with patch.object(OutputDirectory, "publish_temp", interrupted):
+            with self.assertRaises(InterruptedPublication):
+                self.run_task(Metadata())
+        old = self.old_video_policy()
+        runner = self.local_tools()
+        transport = Metadata(forbid_get=True)
+        with patch.object(OutputDirectory, "publish_temp", interrupted):
+            with self.assertRaises(InterruptedPublication):
+                self.run_task(transport)
+        verified = self.video_record()
+        self.assertEqual(verified["status"], "prepared")
+        self.assertEqual(verified["validation_policy"], "mp4-packet-full-decode-v2")
+        self.assertEqual(len(runner.calls), 2)
+        runner.calls.clear()
+        result, code, count = self.run_task(transport, prepare=AssertionError("no redownload"))
+        self.assertEqual(code, 0, result["errors"])
+        self.assertEqual(count, 0)
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(transport.calls, [])
+        local = result["downloads"][0]["local_verification"]
+        self.assertFalse(local["decoded_this_run"])
+        self.assertEqual(local["previous_full_validation"], verified["local_verification"])
+        self.assertEqual(self.video_record()["local_verification"], local)
+        self.assertEqual(self.video_record()["artifact"], old["artifact"])
+
+    def test_malformed_optional_verification_is_rejected_without_changing_media(self):
+        first, code, _ = self.run_task(Metadata())
+        self.assertEqual(code, 0, first["errors"])
+        transport = Metadata(forbid_get=True)
+        runner = self.local_tools()
+        for malformed in ([], {"decoded_this_run": False, "previous_full_validation": []}):
+            with self.subTest(malformed=malformed):
+                with OutputDirectory(self.output) as output, RunState(output) as state:
+                    record = next(iter(state.data["files"].values()))
+                    record["local_verification"] = malformed
+                    state.save()
+                result, code, _ = self.run_task(transport)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(result["errors"][0]["code"], "RUN_STATE_INVALID")
+                self.assertEqual((self.output / first["downloads"][0]["path"]).read_bytes(), BODY)
+                self.assertEqual(self.video_record()["local_verification"], malformed)
+                self.assertEqual(transport.calls, [])
+                self.assertEqual(runner.calls, [])
+
+    def workflow_task(self, args, transport, *, prepare=prepared, decision_provider=None):
+        with patch("apple_music_artwork.motion.prepare_motion", side_effect=prepare) as worker:
+            result, code = dispatch(args, http=HttpClient(transport), environ={}, media_tools=self.tools,
+                                    decision_provider=decision_provider)
+        return result, code, worker.call_count
+
+    def old_workflow_video(self, *, sealed):
+        self.output = self.folder / ("prepared" if sealed else "committed")
+        args = Namespace(command="download", url=self.args.url, response=str(self.response),
+                         output=str(self.output), all_motion=True, no_input=True, json=True)
+        if sealed:
+            class InterruptedPublication(BaseException):
+                pass
+
+            original = OutputDirectory.publish_temp
+
+            def interrupted(directory, temporary, **kwargs):
+                if temporary.final_name.endswith(".mp4"):
+                    raise InterruptedPublication()
+                return original(directory, temporary, **kwargs)
+
+            with patch.object(OutputDirectory, "publish_temp", interrupted):
+                with self.assertRaises(InterruptedPublication):
+                    self.workflow_task(args, Metadata())
+        else:
+            first, code, _ = self.workflow_task(args, Metadata())
+            self.assertEqual(code, 0, first)
+        old = self.old_video_policy()
+        filename = old["temporary"]["name"] if sealed else old["artifact"]["path"]
+        # Workflow tasks use the v2 videos/ layout; artifact paths are media-relative.
+        media = self.output / "videos" / filename
+        self.assertEqual(media.read_bytes(), BODY)
+        return old, media
+
+    def test_interactive_retry_of_old_video_revalidates_locally_without_losing_evidence(self):
+        for sealed in (False, True):
+            with self.subTest(sealed=sealed):
+                old, media = self.old_workflow_video(sealed=sealed)
+                runner = self.local_tools(decode_code=1)
+                transport = Metadata(forbid_get=True)
+                resume = Namespace(command="resume", task_dir=str(self.output), no_input=False, json=False)
+                reasons = []
+
+                def choose(context):
+                    reasons.append(context["reason"])
+                    if len(reasons) == 1:
+                        return {"plan_id": context["plan_id"], "decision_id": context["decision_id"],
+                                "action": "retry", "params": {}}
+                    return None
+
+                rejected, code, count = self.workflow_task(resume, transport,
+                    prepare=ArtworkError("SYNTHETIC_REDOWNLOAD", "Download must not run for local verification.", "download"),
+                    decision_provider=choose)
+                self.assertEqual(count, 0)
+                self.assertEqual(code, 8, rejected)
+                self.assertEqual(reasons, ["VIDEO_DECODE_FAILED", "VIDEO_DECODE_FAILED"])
+                self.assertEqual(len(runner.calls), 4)
+                self.assertEqual(transport.calls, [])
+                retained = self.video_record()
+                for field in ("artifact", "validation_policy", "temporary"):
+                    self.assertEqual(retained[field], old[field])
+                self.assertEqual(media.read_bytes(), BODY)
+                runner.calls.clear()
+                reasons.clear()
+
+                def recover(context):
+                    reasons.append(context["reason"])
+                    runner.decode_code = 0
+                    return {"plan_id": context["plan_id"], "decision_id": context["decision_id"],
+                            "action": "retry", "params": {}} if len(reasons) == 1 else None
+
+                recovered, code, count = self.workflow_task(resume, transport,
+                    prepare=AssertionError("no redownload"), decision_provider=recover)
+                self.assertEqual(code, 0, recovered)
+                self.assertEqual(count, 0)
+                self.assertEqual(reasons, ["VIDEO_DECODE_FAILED"])
+                self.assertEqual(len(runner.calls), 4)
+                self.assertTrue(recovered["downloads"][0]["local_verification"]["decoded_this_run"])
+                self.assertEqual(self.video_record()["artifact"], old["artifact"])
+                self.assertEqual(self.video_record()["validation_policy"], "mp4-packet-full-decode-v2")
+                self.assertEqual((self.output / recovered["downloads"][0]["path"]).read_bytes(), BODY)
+                runner.calls.clear()
+                reused, code, count = self.workflow_task(resume, transport, prepare=AssertionError("no redownload"))
+                self.assertEqual(code, 0, reused)
+                self.assertEqual(runner.calls, [])
+                self.assertEqual(transport.calls, [])
+                self.assertFalse(reused["downloads"][0]["local_verification"]["decoded_this_run"])
+
+    def test_protocol_retry_of_old_video_uses_local_validation_for_both_file_states(self):
+        for sealed in (False, True):
+            with self.subTest(sealed=sealed):
+                old, media = self.old_workflow_video(sealed=sealed)
+                runner = self.local_tools(decode_code=1)
+                transport = Metadata(forbid_get=True)
+                resume = Namespace(command="resume", task_dir=str(self.output), no_input=True, json=True)
+                blocked, code, _ = self.workflow_task(resume, transport, prepare=AssertionError("no redownload"))
+                self.assertEqual(code, 8, blocked)
+                choices = self.folder / ("prepared-choices.json" if sealed else "committed-choices.json")
+
+                def save_retry(result):
+                    context = result["control"]["decisions"][0]
+                    self.assertEqual(context["reason"], "VIDEO_DECODE_FAILED")
+                    choices.write_text(dumps_json({"protocol_version": 1, "choices": [{
+                        "plan_id": context["plan_id"], "decision_id": context["decision_id"],
+                        "action": "retry", "params": {}}]}), encoding="utf-8")
+
+                save_retry(blocked)
+                resume.decisions_file = str(choices)
+                runner.calls.clear()
+                rejected, code, count = self.workflow_task(resume, transport,
+                    prepare=ArtworkError("SYNTHETIC_REDOWNLOAD", "Download must not run for local verification.", "download"))
+                self.assertEqual(code, 8, rejected)
+                self.assertEqual(count, 0)
+                self.assertEqual(len(runner.calls), 4)
+                self.assertEqual(transport.calls, [])
+                retained = self.video_record()
+                for field in ("artifact", "validation_policy", "temporary"):
+                    self.assertEqual(retained[field], old[field])
+                self.assertEqual(media.read_bytes(), BODY)
+                save_retry(rejected)
+                runner.calls.clear()
+                original_run = runner.run
+
+                def recover_after_initial_decode(argv, **limits):
+                    result = original_run(argv, **limits)
+                    if "-progress" in argv:
+                        runner.decode_code = 0
+                    return result
+
+                runner.run = recover_after_initial_decode
+                recovered, code, count = self.workflow_task(resume, transport, prepare=AssertionError("no redownload"))
+                self.assertEqual(code, 0, recovered)
+                self.assertEqual(count, 0)
+                self.assertEqual(len(runner.calls), 4)
+                self.assertTrue(recovered["downloads"][0]["local_verification"]["decoded_this_run"])
+                self.assertEqual(self.video_record()["artifact"], old["artifact"])
+                self.assertEqual(self.video_record()["validation_policy"], "mp4-packet-full-decode-v2")
+                self.assertEqual((self.output / recovered["downloads"][0]["path"]).read_bytes(), BODY)
+                resume.decisions_file = None
+                runner.calls.clear()
+                reused, code, count = self.workflow_task(resume, transport, prepare=AssertionError("no redownload"))
+                self.assertEqual(code, 0, reused)
+                self.assertEqual(runner.calls, [])
+                self.assertEqual(transport.calls, [])
+                self.assertFalse(reused["downloads"][0]["local_verification"]["decoded_this_run"])
 
     def test_first_incomplete_inspection_resumes_only_unknown_metadata(self):
         for failure in ("master", "media", "head"):

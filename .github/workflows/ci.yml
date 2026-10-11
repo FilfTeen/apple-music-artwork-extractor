@@ -227,6 +227,7 @@ jobs:
           sys.exit(not result.wasSuccessful())
           PY
       - name: Generate owned H264 and exercise real CLI decoding
+        id: owned-media
         shell: bash
         run: |
           python - <<'PY'
@@ -244,9 +245,43 @@ jobs:
           ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
           assert ffmpeg and ffprobe
           fixture, bframes = generate_owned_inputs(root, ffmpeg, ffprobe)
+          from hashlib import sha256
+          import json
+          from apple_music_artwork.motion import MediaTools
+          from test_cli_media_tools import _input_evidence
+
+          tools = MediaTools.discover(ffmpeg=ffmpeg, ffprobe=ffprobe)
+          summary = {"fixture_kind": "owned_generated_h264", "media_tools": tools.to_dict(), "samples": []}
+          for sample, reordered in ((fixture, False), (bframes, True)):
+              body, timing = _input_evidence(sample, tools, bframes=reordered)
+              summary["samples"].append({"name": sample.name, "bytes": len(body),
+                                         "sha256": sha256(body).hexdigest(), "timing": timing})
+          summary["distributions"] = []
+          for pattern in ("*.whl", "*.tar.gz"):
+              artifact, = Path("dist").glob(pattern)
+              shutil.copyfile(artifact, root / artifact.name)
+              summary["distributions"].append({"name": artifact.name, "bytes": artifact.stat().st_size,
+                                                "sha256": sha256(artifact.read_bytes()).hexdigest()})
+          (root / "owned-inputs.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+          print(json.dumps(summary, sort_keys=True), flush=True)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"input-root={root}\n")
           subprocess.run([
               sys.executable, "-B", "tests/test_cli_media_tools.py", "--input-video", str(fixture),
               "--bframes-video", str(bframes), "--output-root", str(root),
               "--ffmpeg", ffmpeg, "--ffprobe", ffprobe, "--require-installed",
           ], check=True, timeout=180)
           PY
+      - name: Retain tested distributions and owned inputs for cross-platform verification
+        if: ${{ always() && steps.owned-media.outputs.input-root != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: owned-media-${{ matrix.extra }}
+          path: |
+            ${{ steps.owned-media.outputs.input-root }}/owned-two-frames.mp4
+            ${{ steps.owned-media.outputs.input-root }}/owned-offset-bframes.mp4
+            ${{ steps.owned-media.outputs.input-root }}/owned-inputs.json
+            ${{ steps.owned-media.outputs.input-root }}/*.whl
+            ${{ steps.owned-media.outputs.input-root }}/*.tar.gz
+          retention-days: 1
+          if-no-files-found: error
