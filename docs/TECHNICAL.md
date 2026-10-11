@@ -73,9 +73,9 @@ URL / 本地响应
 
 通过检查后下载原 MP4；ffprobe 核对容器、单视频轨、编码、尺寸和帧率，并扫描所有 packet 的整数 PTS、DTS、duration 与 time_base。DTS 按解码顺序连续；B 帧允许该顺序中的 PTS 前后跳动，但按 PTS 排序后的呈现区间必须连续，无间隙或重叠，每个 packet（含末包）都有明确正时长。不具备这些证据时拒绝，不泛化支持所有 VFR 或时间轴结构。
 
-`duration_seconds` 以完整 packet 呈现区间的跨度为准，`duration_basis=complete_packet_presentation_span`；容器和流报告的 start/duration 单独保留为 `timing_declarations`。带非零起点的容器值不能直接当作内容时长，也不能只靠二者相减接受文件。实际跨度与 HLS 核对后，FFmpeg 完整解码，要求解码帧数等于 packet 数、无丢帧或补帧，解码相对终点与已验证跨度一致。全部通过才提交。
+`duration_seconds` 以完整 packet 呈现区间的跨度为准，`duration_basis=complete_packet_presentation_span`；容器和流报告的 start/duration 单独保留为 `timing_declarations`。带非零起点的容器值不能直接当作内容时长，也不能只靠二者相减接受文件。实际跨度与 HLS 核对后，FFmpeg 完整解码，要求解码帧数等于 packet 数、无丢帧或补帧，解码进度终点与已验证跨度的差异不得超过现有时长容差 `max(0.1 秒, 2 / 平均帧率)`。不同 FFmpeg 版本的进度原值可能表示最后帧起点或呈现末端，完整性须结合帧数、packet 时间轴与完整解码共同判断。全部通过才提交。
 
-HLS `FRAME-RATE` 是声明上限。支持范围与已知限制见 [STATUS.md](STATUS.md)；程序不转码、不改写容器，也不把 HLS、HEAD 或初次 metadata 当作完整解码证明。
+HLS `FRAME-RATE` 是声明上限。实际峰值由连续呈现区间中最短 packet 时长的倒数计算，并以 `validation.frame_rate.observed_maximum` 记录；`average` 和 `nominal` 保留 ffprobe 的平均与基础帧率报告，`nominal` 不可用时为 null；基础帧率估计不再独自决定接受与否。支持范围与已知限制见 [STATUS.md](STATUS.md)；程序不转码、不改写容器，也不把 HLS、HEAD 或初次 metadata 当作完整解码证明。
 
 ## JSON 与清单
 
@@ -106,7 +106,7 @@ list 与下载结果使用 `schema_version: 2`；查询命令使用 schema 1 env
 
 下载结果分别记录 declared/requested/actual dimensions，以及 decoded format、bytes、SHA-256。磁盘 `manifest.json` 的 `status_scope=download_results` 表示它记录下载尝试；它不能证明自身已保存。最终 stdout JSON 的 `manifest_report` 与进程退出码报告清单提交结果。部分文件提交后发生错误时保留已完成文件并返回非零，不悄悄回滚或覆盖；必要的残留以相对文件名报告。
 
-schema 2 中成功项的 `status` 仍为 `downloaded`，用 `action=downloaded|reused` 区分本次新取和本地复用。复用的 `validation` 是原验证证据，`local_verification` 记录本次核验，不能据原 `full_decode=true` 声称本次重新解码。
+schema 2 中成功项的 `status` 仍为 `downloaded`，用 `action=downloaded|reused` 区分本次新取和本地复用。复用的 `validation` 是原验证证据，`local_verification` 记录本次核验，不能据原 `full_decode=true` 声称本次重新解码。视频验证策略为 `mp4-packet-full-decode-v2`；旧策略完成文件首次接续须本地完整复验，成功后推进策略而保留原 `validation`。此次证据写入 `local_verification.validation`，后续常规复用通过 `local_verification.previous_full_validation` 保留最近一次完整核验记录，并将本次 `decoded_this_run` 记为 false。
 
 `run` 的 `run_id` 标识本次执行，`task_fingerprint` 标识冻结任务，`resumed` 标记恢复。`snapshot.created_at` 是原采集时间，旧清单缺失时为 null；`snapshot.remote_freshness=not_rechecked` 专指恢复时没有重新获取资源目录信息。`pending_inspection={attempted,completed,checked_at}` 披露对上次未完成动态规格的补查；已有所选档位只继续它的媒体播放列表，已有 MP4 布局只补其 HEAD，不回退重选 master。
 

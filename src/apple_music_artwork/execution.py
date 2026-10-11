@@ -31,7 +31,7 @@ from .urls import parse_url
 
 EXIT_CODES = {"internal": 1, "input": 2, "auth": 3, "api": 4,
               "discovery": 5, "selection": 5, "rendition": 6, "download": 6, "validation": 7}
-VALIDATION_POLICIES = {"image": "image-decode-v1", "video": "mp4-packet-full-decode-v1"}
+VALIDATION_POLICIES = {"image": "image-decode-v1", "video": "mp4-packet-full-decode-v2"}
 
 
 def _error_result(error: ArtworkError) -> dict:
@@ -872,7 +872,7 @@ class _Coordinator:
             if self.fatal:
                 raise
 
-    def publish(self, plan, temporary, artifact):
+    def publish(self, plan, temporary, artifact, *, local_verification=None):
         _check_artifact(plan, artifact)
         record = self.state.data["files"][plan["item_id"]]
         record.update(status="prepared", temporary=temporary.record(), artifact=artifact,
@@ -886,10 +886,14 @@ class _Coordinator:
             if error.committed:
                 entry = self.decorated(plan, artifact, "downloaded")
                 entry["output"] = error.output_state()
+                if local_verification is not None:
+                    entry["local_verification"] = deepcopy(local_verification)
                 self.outcomes[plan["item_id"]] = entry
             raise
         record["status"] = "committed"
         self.outcomes[plan["item_id"]] = self.decorated(plan, artifact, "downloaded")
+        if local_verification is not None:
+            self.outcomes[plan["item_id"]]["local_verification"] = deepcopy(local_verification)
         self.checkpoint()
         self.emit("committed", plan)
         self.cleanup_committed(plan, record)
@@ -914,6 +918,33 @@ class _Coordinator:
             raise ArtworkError("OUTPUT_CONFLICT", "Existing media changed during local validation; its bytes were preserved.", "download")
         return result
 
+    def verify_local_record(self, plan, record, actual, filename=None):
+        local = {"checked_at": utc_now(), "method": "length_sha256_and_frozen_request",
+                 "bytes": actual["bytes"], "sha256": actual["sha256"],
+                 "validation_policy": VALIDATION_POLICIES[plan["kind"]], "decoded_this_run": False}
+        previous = record.get("local_verification", {})
+        if not isinstance(previous, dict):
+            raise _invalid()
+        if "previous_full_validation" in previous and not isinstance(previous["previous_full_validation"], dict):
+            raise _invalid()
+        if record["validation_policy"] != local["validation_policy"]:
+            local.update(method="full_local_validation", decoded_this_run=True,
+                         validation=self.full_local_validation(plan, actual, filename))
+        else:
+            if not previous.get("decoded_this_run"):
+                previous = previous.get("previous_full_validation", {})
+            if (previous.get("method") == "full_local_validation"
+                    and previous.get("decoded_this_run") is True
+                    and isinstance(previous.get("validation"), dict)
+                    and previous["validation"].get("decoded") is True
+                    and (plan["kind"] != "video" or previous["validation"].get("full_decode") is True)
+                    and all(previous.get(key) == local[key]
+                            for key in ("validation_policy", "bytes", "sha256"))):
+                local["previous_full_validation"] = {
+                    key: deepcopy(value) for key, value in previous.items()
+                    if key != "previous_full_validation"}
+        return local
+
     def existing(self):
         for plan in self.plans:
             self.control.check()
@@ -931,7 +962,10 @@ class _Coordinator:
                     self.failure(plan, _error_value(plan["blocked_error"]))
                     continue
                 identity = directory.file_identity(plan["filename"])
-                if record["status"] == "prepared" and identity is None:
+                recover_prepared = (record["status"] == "prepared"
+                                    or (record["status"] == "conflict" and record["artifact"] is not None
+                                        and record["temporary"] is not None and record["temporary"]["sealed"]))
+                if recover_prepared and identity is None:
                     if directory.temporary_exists(record["temporary"]["name"]):
                         temporary = directory.restore_temp(record["temporary"])
                         actual = directory.hash_file(temporary.name, max_bytes=MAX_IMAGE_BYTES if plan["kind"] == "image" else MAX_MOTION_BYTES,
@@ -939,13 +973,9 @@ class _Coordinator:
                         validation = _check_artifact(plan, record["artifact"])
                         if any(actual[key] != validation[key] for key in ("bytes", "sha256")):
                             raise ArtworkError("OUTPUT_CONFLICT", "Prepared media changed after validation; it was preserved.", "download")
-                        if record["validation_policy"] != VALIDATION_POLICIES[plan["kind"]]:
-                            record["local_verification"] = {
-                                "checked_at": utc_now(), "method": "full_local_validation", "decoded_this_run": True,
-                                "bytes": actual["bytes"], "sha256": actual["sha256"],
-                                "validation_policy": VALIDATION_POLICIES[plan["kind"]],
-                                "validation": self.full_local_validation(plan, actual, temporary.name)}
-                        self.publish(plan, temporary, record["artifact"])
+                        local = self.verify_local_record(plan, record, actual, temporary.name)
+                        record["local_verification"] = local
+                        self.publish(plan, temporary, record["artifact"], local_verification=local)
                         continue
                 if identity is not None:
                     if record["status"] not in {"prepared", "committed", "conflict"} or record["artifact"] is None:
@@ -955,13 +985,8 @@ class _Coordinator:
                                                    check=self.control.check)
                     if any(actual[key] != validation[key] for key in ("bytes", "sha256")):
                         raise ArtworkError("OUTPUT_CONFLICT", "Existing media differs from its verified length or SHA-256; it was preserved.", "download")
-                    local = {"checked_at": utc_now(), "method": "length_sha256_and_frozen_request",
-                             "bytes": actual["bytes"], "sha256": actual["sha256"],
-                             "validation_policy": VALIDATION_POLICIES[plan["kind"]], "decoded_this_run": False}
-                    if record["validation_policy"] != VALIDATION_POLICIES[plan["kind"]]:
-                        local.update(method="full_local_validation", decoded_this_run=True,
-                                     validation=self.full_local_validation(plan, actual))
-                        record["validation_policy"] = VALIDATION_POLICIES[plan["kind"]]
+                    local = self.verify_local_record(plan, record, actual)
+                    record["validation_policy"] = VALIDATION_POLICIES[plan["kind"]]
                     record.update(status="committed", local_verification=local)
                     record.pop("error", None)
                     self.checkpoint()
