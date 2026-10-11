@@ -1,6 +1,6 @@
 # Agent 使用接口
 
-先运行 `apple-artwork capabilities --json` 获取当前安装版本、参数和协议，再运行 `apple-artwork capabilities --guide` 读取随包的完整运行 Skill。该 Skill 面向使用工具，不需要工程源码或 AGENTS 文件，不会自动安装到全局目录。
+先运行 `apple-artwork capabilities --json` 获取当前安装版本、参数和协议，再运行 `apple-artwork capabilities --guide` 读取随包的完整操作指南。指南可通过已安装的 CLI 直接读取，不会自动安装到全局目录。
 
 ## 命令与输出通道
 

@@ -19,7 +19,7 @@
 
 下载功能面向 macOS 和 Linux，文件提交需要 POSIX 目录描述符、no-follow 和文件锁能力；Windows 下载目前不支持。
 
-Linux CI 配置七组安装检查：Python 3.11、3.12、3.13、3.14 的基础依赖环境，以及 Python 3.12 的 `ui`、`motion`、`ui,motion` 组合；动态组合还执行真实媒体工具集成。配置范围不等于所有组合已经通过，每个版本实际验证的操作系统、FFmpeg／ffprobe 版本及安装包结果见对应发行说明。本版本结果参见 [v0.5.1 发行说明](https://github.com/FilfTeen/apple-music-artwork-extractor/releases/tag/v0.5.1)；逐次运行记录见 [Checks](https://github.com/FilfTeen/apple-music-artwork-extractor/actions/workflows/ci.yml)。
+macOS 和 Linux 均可在 Python 3.11+ 的虚拟环境中安装发行包，并按需添加 `ui` 或 `motion` 依赖；动态下载还需自行安装适合本机的 FFmpeg 与 ffprobe。安装步骤见 [README](../README.md#安装)，当前版本变化见 [v0.5.1 发行说明](https://github.com/FilfTeen/apple-music-artwork-extractor/releases/tag/v0.5.1)。
 
 终端按当前宽度渲染，支持中文文本、纯文本、无颜色和重定向。不同终端的字体、字符宽度与窗口缩放表现仍可能不同。
 
@@ -31,7 +31,7 @@ Linux CI 配置七组安装检查：Python 3.11、3.12、3.13、3.14 的基础�
 - 图片上限为 32 MiB／4000 万像素，单视频上限为 256 MiB。
 - 字段未返回、null、空值、异常和未知观察分别记录。未返回素材不证明远端实际不存在，未知候选和未验证内容会阻止完整标记。
 - 远端更新检查只观察资源信息和必要的 HLS/HEAD。地址变化不证明内容变化，声明相同不证明媒体字节相同，服务器错误标注响应类型仍可能突破基于声明的正文边界。
-- 官方 catalog provider 需要使用者自己的开发者 token。真实 catalog 认证尚未实测；资源、地区和语言组合未作全覆盖验证。
+- 官方 catalog provider 属于实验性功能，需要使用者自己的开发者 token；真实认证兼容性尚未确认，不保证覆盖所有资源、地区和语言组合。
 
 ## 恢复与兼容边界
 
@@ -41,10 +41,6 @@ Linux CI 配置七组安装检查：Python 3.11、3.12、3.13、3.14 的基础�
 
 命令成功仍须检查 `coverage`、警告、逐项结果和 `manifest_report`。明确跳过可使命令结束，但不会把原选择范围标为全部完成。
 
-## 验证方法
+## 开发与测试
 
-默认 `unittest` 使用合成输入，不访问 Apple 服务。完整离线回归需要安装开发及动态依赖；基础依赖和可选组合应分别检查。构建后还应安装真实 wheel，并核对实际导入来源、命令入口、随包指南与离线示例。
-
-`tests/test_cli_media_tools.py` 使用自有小型 H.264 输入，检查原字节、真实 probe、完整解码、截断拒绝和原目录复用。HLS、HEAD、替身 probe 或文件存在不能单独证明视频可完整解码。
-
-离线回归不能证明实时 Apple 服务仍返回相同字段。在线检查应独立说明样本、地区语言、时间和实际下载范围，不扩展为全目录保证。具体命令见 [维护与贡献](../CONTRIBUTING.md) 和 [技术说明](TECHNICAL.md#验证入口)。
+开发环境、离线测试和构建命令见 [维护与贡献](../CONTRIBUTING.md)，媒体工具集成与验证边界见 [技术说明](TECHNICAL.md#验证入口)。

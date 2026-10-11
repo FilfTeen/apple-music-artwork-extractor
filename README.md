@@ -1,8 +1,8 @@
 # Apple Music Artwork Extractor
 
-从 Apple Music 公开链接发现视觉素材，按明确规则选择封面，下载并验证图片及支持的动态封面。支持 playlist、album、artist、song；single、EP、compilation 使用 album 资源族。
+从 Apple Music 公开链接发现视觉素材，按明确规则选择封面，下载并验证图片及支持的动态封面。支持 playlist、album、artist、song；single、EP、compilation 使用 album 资源族。当前正式版本为 [v0.5.1](https://github.com/FilfTeen/apple-music-artwork-extractor/releases/tag/v0.5.1)。
 
-v0.5 提供可读任务导航、编号接续、离线版本差异与只读远端更新检查，保留引导式终端、预检、版本资料库及 Agent 使用协议。动态下载支持播放列表明确描述的完整单文件 MP4；不支持的布局会留在结果中。默认 Web provider 使用实验性 Apple Music Web 接口，支持范围与已知限制见 [STATUS.md](docs/STATUS.md)。
+提供可读任务导航、编号接续、离线版本差异与只读远端更新检查，保留引导式终端、预检、版本资料库及 Agent 使用协议。动态下载支持播放列表明确描述的完整单文件 MP4；不支持的布局会留在结果中。默认 Web provider 使用实验性 Apple Music Web 接口，支持范围与已知限制见 [STATUS.md](docs/STATUS.md)。
 
 ## 安装
 
@@ -188,7 +188,7 @@ apple-artwork 'APPLE_MUSIC_URL' --provider catalog --list --json
 
 可用 `--token-env NAME` 指定另一个环境变量。token 不作为命令参数，也不写入结果。官方 catalog 的字段范围与实验性 Web 接口不同，不能保证同样的 editorial 或 motion 信息。
 
-## 开发和验证
+## 自动化调用与开发
 
 将工具交给 Agent 时，先运行：
 
@@ -199,15 +199,7 @@ apple-artwork capabilities --guide
 
 指南随安装包提供，包含能力检查、预检、明确决策、执行、结果检查和接续的完整用法。新查询接口为 schema 1，已有下载结果继续为 schema 2；详见 [Agent 接口说明](docs/AGENT_INTERFACE.md)。
 
-```sh
-python -m pip install -e '.[dev,motion,ui]'
-python -B -m unittest discover -s tests -v
-python -m build
-```
-
-依赖安装后，默认测试不访问 Apple 服务。CI 分别验证仅静态依赖和包含媒体工具的环境，构建 wheel/sdist 后测试安装件。在线验证与离线回归分开记录。
-
-`tests/test_cli_media_tools.py` 是单独运行的媒体工具集成验收：向实际 CLI 注入合成响应、两帧 H.264 和非零起点 B 帧 MP4，真实探测及完整解码，再检查原目录复用和截断失败。调用方式与验证边界见 [TECHNICAL.md](docs/TECHNICAL.md)。
+开发环境、测试和构建命令见 [维护与贡献](CONTRIBUTING.md)；离线回归与媒体工具集成的运行方式见 [技术说明](docs/TECHNICAL.md#验证入口)。
 
 本工具不处理 Apple ID 登录、私人资料库、私人播放列表认证、音乐下载或 DRM 绕过。未知候选保留供检查，默认不会自动选择；缺少尺寸、无法解码或超限时明确失败。图片上限为 32 MiB／4000 万像素，单视频上限为 256 MiB。
 
