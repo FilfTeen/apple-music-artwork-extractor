@@ -17,6 +17,12 @@ python -m pip install ./apple_music_artwork-0.5.1-py3-none-any.whl
 apple-artwork doctor
 ```
 
+使用同一 wheel 安装可选终端界面及动态解析依赖：
+
+```sh
+python -m pip install './apple_music_artwork-0.5.1-py3-none-any.whl[ui,motion]'
+```
+
 也可在完整源码目录执行：
 
 ```sh
@@ -28,7 +34,7 @@ apple-artwork --help
 
 `apple-music-artwork` 是同一命令的别名，也可运行 `python -m apple_music_artwork`。
 
-检查或下载动态素材时安装可选解析依赖：
+从源码安装时，在源码目录中添加动态检查或下载所需的可选解析依赖：
 
 ```sh
 python -m pip install '.[motion]'
@@ -38,14 +44,14 @@ python -m pip install '.[motion]'
 
 ## 先离线检查
 
-运行 `apple-artwork` 可进入简短向导；在管道或其他非交互环境中，无参数只显示简明用法。可选终端界面依赖提供更平稳的多条目刷新：
+运行 `apple-artwork` 可进入简短向导；在管道或其他非交互环境中，无参数只显示简明用法。可选终端界面依赖提供更平稳的多条目刷新。从源码安装时，在源码目录执行：
 
 ```sh
 python -m pip install '.[ui]'
 apple-artwork doctor
 ```
 
-`ui` 不改变下载和验证能力，未安装时仍可使用全部命令。需要完整界面及动态能力可安装 `.[ui,motion]`。
+`ui` 不改变下载和验证能力，未安装时仍可使用全部命令。从源码安装时，需要完整界面及动态能力可在源码目录安装 `.[ui,motion]`。
 
 以下示例无需连接 Apple，也不会写文件：
 
