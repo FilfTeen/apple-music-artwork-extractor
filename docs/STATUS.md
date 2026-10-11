@@ -17,7 +17,9 @@
 
 ## 平台
 
-v0.5.0 已在 macOS arm64 进行本地运行与安装检查。Linux 远端 CI 的 Python 3.11–3.14 基础环境及 Python 3.12 UI 组合已通过；两个动态组合曾因短视频基础帧率估计值造成误拒。v0.5.1 已修正验证规则，新的 macOS 安装件与 Linux 动态组合验收仍待完成，不能把旧版本结果视为新候选已通过。Windows 下载目前不支持，因为文件提交依赖 POSIX 目录描述符、no-follow 和文件锁能力。
+下载功能面向 macOS 和 Linux，文件提交需要 POSIX 目录描述符、no-follow 和文件锁能力；Windows 下载目前不支持。
+
+Linux CI 配置七组安装检查：Python 3.11、3.12、3.13、3.14 的基础依赖环境，以及 Python 3.12 的 `ui`、`motion`、`ui,motion` 组合；动态组合还执行真实媒体工具集成。配置范围不等于所有组合已经通过，每个版本实际验证的操作系统、FFmpeg／ffprobe 版本及安装包结果见对应发行说明。本版本结果参见 [v0.5.1 发行说明](https://github.com/FilfTeen/apple-music-artwork-extractor/releases/tag/v0.5.1)；逐次运行记录见 [Checks](https://github.com/FilfTeen/apple-music-artwork-extractor/actions/workflows/ci.yml)。
 
 终端按当前宽度渲染，支持中文文本、纯文本、无颜色和重定向。不同终端的字体、字符宽度与窗口缩放表现仍可能不同。
 

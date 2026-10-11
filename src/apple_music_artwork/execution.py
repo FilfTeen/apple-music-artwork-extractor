@@ -945,8 +945,10 @@ class _Coordinator:
                     if key != "previous_full_validation"}
         return local
 
-    def existing(self):
+    def existing(self, item_ids=None):
         for plan in self.plans:
+            if item_ids is not None and plan["item_id"] not in item_ids:
+                continue
             self.control.check()
             self.emit("check_existing", plan)
             record = self.state.data["files"][plan["item_id"]]
@@ -1220,6 +1222,7 @@ class _Coordinator:
                 continue
             self.lifecycle, self.decisions = "running", []
             self.control.begin_attempt_window()
+            local_retry_ids = set()
             for item_id in retry_ids:
                 if item_id.startswith("issue_"):
                     asset_id = item_id.removeprefix("issue_")
@@ -1229,10 +1232,17 @@ class _Coordinator:
                 else:
                     self.outcomes.pop(item_id, None)
                     record = self.state.data["files"][item_id]
-                    record["status"] = "pending"
-                    record.pop("error", None)
+                    plan = next(plan for plan in self.plans if plan["item_id"] == item_id)
+                    sealed = record["temporary"] is not None and record["temporary"]["sealed"]
+                    if record["artifact"] is not None and (sealed or self.media(plan).file_identity(plan["filename"]) is not None):
+                        local_retry_ids.add(item_id)
+                    else:
+                        record["status"] = "pending"
+                        record.pop("error", None)
             self.checkpoint()
             self.pending_inspection()
+            if local_retry_ids:
+                self.existing(local_retry_ids)
             self.schedule()
 
     def control_result(self):
